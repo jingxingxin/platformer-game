@@ -565,15 +565,12 @@ function chooseBossAttackMode() {
   if (boss.attackMode !== "idle") return;
   if (boss.globalCooldown > 0) return;
   if (hasBossAttackRemnant()) return;
-  let nextAttack = null;
-  if (boss.flameCooldown <= 0) {
-    nextAttack = "flame";
-  } else if (boss.chargeCooldown <= 0) {
-    nextAttack = "charge";
-  } else if (boss.fireballCooldown <= 0) {
-    nextAttack = "fireball";
-  }
-  if (!nextAttack) return;
+  const readyAttacks = [];
+  if (boss.fireballCooldown <= 0) readyAttacks.push("fireball");
+  if (boss.chargeCooldown <= 0) readyAttacks.push("charge");
+  if (boss.flameCooldown <= 0) readyAttacks.push("flame");
+  if (readyAttacks.length === 0) return;
+  const nextAttack = readyAttacks[Math.floor(Math.random() * readyAttacks.length)];
 
   const playerCenterY = player.y + player.h * 0.5;
   const bossCenterY = boss.y + boss.h * 0.5;
