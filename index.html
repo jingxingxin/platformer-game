@@ -17,12 +17,17 @@
     <script>
       (() => {
         const APP_VERSION = "2026.02.13.3";
+        const APP_UPDATED_AT = "2026-02-13 14:44:27 +0800";
         const VERSION_FILE = "version.json";
         const VERSION_STORAGE_KEY = "platformer_latest_version";
         const RELOAD_ATTEMPTS_KEY = "platformer_force_reload_attempts";
         const MAX_FORCE_RELOAD_ATTEMPTS = 3;
 
-        const loadGame = () => {
+        const loadGame = (meta = {}) => {
+          window.__GAME_META__ = {
+            version: meta.version || APP_VERSION,
+            updatedAt: meta.updatedAt || APP_UPDATED_AT
+          };
           const script = document.createElement("script");
           script.src = `game.js?v=${encodeURIComponent(APP_VERSION)}`;
           document.body.appendChild(script);
@@ -46,6 +51,8 @@
           .then((data) => {
             const latestVersion =
               data && typeof data.version === "string" ? data.version : APP_VERSION;
+            const latestUpdatedAt =
+              data && typeof data.updatedAt === "string" ? data.updatedAt : APP_UPDATED_AT;
             localStorage.setItem(VERSION_STORAGE_KEY, latestVersion);
 
             if (latestVersion !== APP_VERSION) {
@@ -54,10 +61,10 @@
             }
 
             sessionStorage.removeItem(RELOAD_ATTEMPTS_KEY);
-            loadGame();
+            loadGame({ version: latestVersion, updatedAt: latestUpdatedAt });
           })
           .catch(() => {
-            loadGame();
+            loadGame({ version: APP_VERSION, updatedAt: APP_UPDATED_AT });
           });
       })();
     </script>

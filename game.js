@@ -6,6 +6,10 @@ const HEIGHT = canvas.height;
 const WORLD_WIDTH = 5200;
 const GRAVITY = 0.72;
 const GROUND_Y = 470;
+const GAME_META = window.__GAME_META__ || {
+  version: "dev",
+  updatedAt: "unknown"
+};
 
 const keys = Object.create(null);
 const keyPressed = Object.create(null);
@@ -68,6 +72,7 @@ const player = {
   attackCooldown: 0,
   attackId: 0,
   crouching: false,
+  walkCycle: 0,
   level: 1,
   exp: 0,
   kills: 0,
@@ -128,6 +133,10 @@ const eliteGuard = {
   alive: true,
   hurtStun: 0,
   knock: 0,
+  skillMode: "idle",
+  skillTimer: 0,
+  fireCooldown: 220,
+  fireDir: 1,
   lastHitAttackId: -1
 };
 
@@ -152,10 +161,13 @@ const boss = {
   chargeDir: -1,
   chargeState: "none",
   chargeWindupFrames: 40,
+  alignYTolerance: 18,
+  alignYSpeed: 3.2,
   lastHitAttackId: -1
 };
 
 const fireballs = [];
+const eliteFireballs = [];
 const flamePillars = [];
 const flameWarnings = [];
 const confetti = [];
@@ -252,8 +264,13 @@ function gainExpAndLevel() {
 
 function tryDropKey(x, y) {
   if (keyItem.active || keyItem.collected) return;
+  let dropX = x + 10;
+  // Ensure key never spawns inside the locked hall-door visual area.
+  if (dropX > door.x - 20 && dropX < door.x + door.w + 20) {
+    dropX = door.x - 44;
+  }
   keyItem.active = true;
-  keyItem.x = x + 10;
+  keyItem.x = dropX;
   keyItem.y = y + 22;
   setStatus("钥匙掉落了！快去拾取。", 300);
 }
@@ -297,22 +314,21 @@ function updatePlayer() {
   if (player.invulnTimer > 0) player.invulnTimer -= 1;
   if (statusTimer > 0) statusTimer -= 1;
 
+  if (player.onGround && !player.crouching && Math.abs(player.vx) > 0.2) {
+    player.walkCycle += Math.abs(player.vx) * 0.15;
+  } else {
+    player.walkCycle = 0;
+  }
+
   player.vy += GRAVITY;
   player.x += player.vx;
   player.y += player.vy;
   solvePlatforms(player);
 
   if (!player.inBossRoom) {
-    if (!door.open && player.x + player.w > door.x + 8) {
-      player.x = door.x + 8 - player.w;
-      player.vx = Math.min(player.vx, 0);
-    }
     player.x = clamp(player.x, 0, MAIN_END_X - player.w);
   } else {
-    player.x = clamp(player.x, bossGateLeft, WORLD_WIDTH - player.w);
-    if (player.x < bossGateLeft + 4) {
-      player.x = bossGateLeft + 4;
-    }
+    player.x = clamp(player.x, 0, WORLD_WIDTH - player.w);
   }
 
   if (player.y > HEIGHT + 300) {
@@ -373,12 +389,40 @@ function updateEliteGuard() {
   if (!eliteGuard.alive || gameOver || gameWin || player.inBossRoom) return;
   const atk = playerAttackBox();
 
+  if (eliteGuard.fireCooldown > 0) eliteGuard.fireCooldown -= 1;
+
   if (eliteGuard.hurtStun > 0) {
     eliteGuard.hurtStun -= 1;
     eliteGuard.x += eliteGuard.knock;
     eliteGuard.knock *= 0.84;
     if (Math.abs(eliteGuard.knock) < 0.2) eliteGuard.knock = 0;
+    eliteGuard.skillMode = "idle";
+    eliteGuard.skillTimer = 0;
   } else {
+    if (eliteGuard.skillMode === "idle" && eliteGuard.fireCooldown <= 0) {
+      eliteGuard.skillMode = "windup";
+      eliteGuard.skillTimer = 28;
+      eliteGuard.fireDir = player.x > eliteGuard.x ? 1 : -1;
+    }
+
+    if (eliteGuard.skillMode === "windup") {
+      eliteGuard.skillTimer -= 1;
+      eliteGuard.x -= eliteGuard.fireDir * 1.1;
+      if (eliteGuard.skillTimer <= 0) {
+        eliteGuard.skillMode = "fire";
+      }
+    } else if (eliteGuard.skillMode === "fire") {
+      eliteFireballs.push({
+        x: eliteGuard.fireDir > 0 ? eliteGuard.x + eliteGuard.w + 4 : eliteGuard.x - 4,
+        y: eliteGuard.y + 28,
+        r: 9,
+        vx: eliteGuard.fireDir * 4.3,
+        damage: 14
+      });
+      eliteGuard.skillMode = "idle";
+      eliteGuard.fireCooldown = 240;
+    }
+
     eliteGuard.x += eliteGuard.vx;
     if (eliteGuard.x < eliteGuard.left || eliteGuard.x + eliteGuard.w > eliteGuard.right) {
       eliteGuard.vx *= -1;
@@ -405,6 +449,31 @@ function updateEliteGuard() {
       gainExpAndLevel();
       tryDropKey(eliteGuard.x, eliteGuard.y);
       setStatus("双角精英守卫已被击败。", 260);
+      eliteFireballs.length = 0;
+    }
+  }
+}
+
+function updateEliteProjectiles() {
+  if (gameOver || gameWin || player.inBossRoom) {
+    eliteFireballs.length = 0;
+    return;
+  }
+  for (let i = eliteFireballs.length - 1; i >= 0; i -= 1) {
+    const f = eliteFireballs[i];
+    f.x += f.vx;
+    if (f.x < -50 || f.x > MAIN_END_X + 50) {
+      eliteFireballs.splice(i, 1);
+      continue;
+    }
+    if (
+      player.x < f.x + f.r &&
+      player.x + player.w > f.x - f.r &&
+      player.y < f.y + f.r &&
+      player.y + player.h > f.y - f.r
+    ) {
+      hitPlayer(f.damage, f.x);
+      eliteFireballs.splice(i, 1);
     }
   }
 }
@@ -445,9 +514,10 @@ function updateDoorAndTransition() {
   if (!player.inBossRoom && door.open && player.x > door.x + door.w + 14) {
     player.inBossRoom = true;
     player.x = bossRoomStart + 40;
-    player.y = 230;
+    player.y = GROUND_Y - player.h;
     player.vx = 0;
     player.vy = 0;
+    player.onGround = true;
     boss.active = true;
     setStatus("恶龙苏醒！小心它的三种攻击。", 300);
   }
@@ -495,34 +565,65 @@ function chooseBossAttackMode() {
   if (boss.attackMode !== "idle") return;
   if (boss.globalCooldown > 0) return;
   if (hasBossAttackRemnant()) return;
+  let nextAttack = null;
   if (boss.flameCooldown <= 0) {
+    nextAttack = "flame";
+  } else if (boss.chargeCooldown <= 0) {
+    nextAttack = "charge";
+  } else if (boss.fireballCooldown <= 0) {
+    nextAttack = "fireball";
+  }
+  if (!nextAttack) return;
+
+  const playerCenterY = player.y + player.h * 0.5;
+  const bossCenterY = boss.y + boss.h * 0.5;
+  const diffY = playerCenterY - bossCenterY;
+
+  // Align with player on Y-axis before launching an attack.
+  if (Math.abs(diffY) > boss.alignYTolerance) {
+    boss.vy = clamp(diffY * 0.12, -boss.alignYSpeed, boss.alignYSpeed);
+    return;
+  }
+
+  boss.vy = 0;
+  if (nextAttack === "flame") {
     boss.attackMode = "flame";
     boss.modeTimer = 0;
     return;
   }
-  if (boss.chargeCooldown <= 0) {
+  if (nextAttack === "charge") {
     boss.attackMode = "charge";
     boss.modeTimer = boss.chargeWindupFrames;
     boss.chargeDir = player.x > boss.x ? 1 : -1;
     boss.chargeState = "windup";
+    boss.vx = 0;
     return;
   }
-  if (boss.fireballCooldown <= 0) {
-    boss.attackMode = "fireball";
-    boss.modeTimer = 18;
-  }
+  boss.attackMode = "fireball";
+  boss.modeTimer = 18;
 }
 
 function updateBoss() {
   if (!boss.active || !boss.alive || gameOver || gameWin) return;
   const atk = playerAttackBox();
+  const bossMinX = bossGateLeft + 120;
+  const bossMaxX = WORLD_WIDTH - 40 - boss.w;
 
   boss.fireballCooldown -= 1;
   boss.chargeCooldown -= 1;
   boss.flameCooldown -= 1;
   if (boss.globalCooldown > 0) boss.globalCooldown -= 1;
-  boss.x += boss.vx;
-  if (boss.x < bossGateLeft + 120 || boss.x + boss.w > WORLD_WIDTH - 40) boss.vx *= -1;
+
+  // Passive patrol movement should not run during charge states.
+  if (boss.attackMode !== "charge") {
+    boss.x += boss.vx;
+    if (boss.x < bossMinX || boss.x > bossMaxX) {
+      boss.x = clamp(boss.x, bossMinX, bossMaxX);
+      boss.vx *= -1;
+    }
+  }
+  boss.y += boss.vy;
+  boss.y = clamp(boss.y, 150, GROUND_Y - boss.h);
 
   chooseBossAttackMode();
   if (boss.attackMode === "fireball") {
@@ -549,16 +650,16 @@ function updateBoss() {
     if (boss.chargeState === "windup") {
       // Brief backstep before dashing, with red glow warning.
       boss.x -= boss.chargeDir * 2.2;
+      boss.x = clamp(boss.x, bossMinX, bossMaxX);
       if (boss.modeTimer <= 0) {
         boss.chargeState = "dash";
         boss.modeTimer = 34;
       }
     } else {
-      boss.x += boss.chargeDir * 11.2;
-      if (boss.x < bossGateLeft + 120 || boss.x + boss.w > WORLD_WIDTH - 40) {
-        boss.chargeDir *= -1;
-      }
-      if (boss.modeTimer <= 0) {
+      const nextX = boss.x + boss.chargeDir * 11.2;
+      const hitBoundary = nextX < bossMinX || nextX > bossMaxX;
+      boss.x = clamp(nextX, bossMinX, bossMaxX);
+      if (hitBoundary || boss.modeTimer <= 0) {
         boss.attackMode = "idle";
         boss.chargeState = "none";
         boss.chargeCooldown = 260;
@@ -776,6 +877,17 @@ function drawWorld() {
     ctx.fill();
   }
 
+  for (const f of eliteFireballs) {
+    ctx.fillStyle = "#f97316";
+    ctx.beginPath();
+    ctx.arc(f.x, f.y, f.r, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = "#fde68a";
+    ctx.beginPath();
+    ctx.arc(f.x, f.y, Math.max(2, f.r - 4), 0, Math.PI * 2);
+    ctx.fill();
+  }
+
   for (const p of flamePillars) {
     ctx.fillStyle = "#f97316";
     ctx.fillRect(p.x, p.y, p.w, p.h);
@@ -797,90 +909,128 @@ function drawWorld() {
       ctx.fillRect(boss.x - 10, boss.y - 10, boss.w + 20, boss.h + 20);
     }
     const dragonFace = player.x >= boss.x ? 1 : -1;
-    const headX = dragonFace > 0 ? boss.x + boss.w - 44 : boss.x + 8;
-    const headEyeX = dragonFace > 0 ? headX + 26 : headX + 10;
+    const t = performance.now() * 0.006;
+    const bodyX = boss.x + 16;
+    const bodyY = boss.y + 34;
+    const bodyW = boss.w - 32;
+    const bodyH = boss.h - 34;
 
     // Wings
-    ctx.fillStyle = "#7f1d1d";
+    ctx.fillStyle = "#4a0f0f";
     ctx.beginPath();
-    ctx.moveTo(boss.x + 16, boss.y + 40);
-    ctx.lineTo(boss.x - 32, boss.y + 4);
-    ctx.lineTo(boss.x + 4, boss.y + 62);
+    ctx.moveTo(bodyX + 10, bodyY + 14);
+    ctx.lineTo(bodyX - 30, bodyY - 18);
+    ctx.lineTo(bodyX + 2, bodyY + 32);
     ctx.fill();
     ctx.beginPath();
-    ctx.moveTo(boss.x + boss.w - 16, boss.y + 40);
-    ctx.lineTo(boss.x + boss.w + 32, boss.y + 4);
-    ctx.lineTo(boss.x + boss.w - 4, boss.y + 62);
+    ctx.moveTo(bodyX + bodyW - 10, bodyY + 14);
+    ctx.lineTo(bodyX + bodyW + 30, bodyY - 18);
+    ctx.lineTo(bodyX + bodyW - 2, bodyY + 32);
     ctx.fill();
 
-    // Tail
-    ctx.fillStyle = "#991b1b";
+    // Tail (longer and thicker)
+    ctx.fillStyle = "#5b1212";
     if (dragonFace > 0) {
-      ctx.fillRect(boss.x - 26, boss.y + 58, 30, 12);
+      ctx.fillRect(bodyX - 52, bodyY + 20, 54, 14);
       ctx.beginPath();
-      ctx.moveTo(boss.x - 26, boss.y + 58);
-      ctx.lineTo(boss.x - 38, boss.y + 64);
-      ctx.lineTo(boss.x - 26, boss.y + 70);
+      ctx.moveTo(bodyX - 52, bodyY + 20);
+      ctx.lineTo(bodyX - 72, bodyY + 27);
+      ctx.lineTo(bodyX - 52, bodyY + 34);
       ctx.fill();
     } else {
-      ctx.fillRect(boss.x + boss.w - 4, boss.y + 58, 30, 12);
+      ctx.fillRect(bodyX + bodyW - 2, bodyY + 20, 54, 14);
       ctx.beginPath();
-      ctx.moveTo(boss.x + boss.w + 26, boss.y + 58);
-      ctx.lineTo(boss.x + boss.w + 38, boss.y + 64);
-      ctx.lineTo(boss.x + boss.w + 26, boss.y + 70);
+      ctx.moveTo(bodyX + bodyW + 52, bodyY + 20);
+      ctx.lineTo(bodyX + bodyW + 72, bodyY + 27);
+      ctx.lineTo(bodyX + bodyW + 52, bodyY + 34);
       ctx.fill();
     }
 
-    // Body
-    ctx.fillStyle = "#991b1b";
-    ctx.fillRect(boss.x + 10, boss.y + 22, boss.w - 20, boss.h - 16);
-    ctx.fillStyle = "#fca5a5";
-    ctx.fillRect(boss.x + 24, boss.y + 42, boss.w - 48, 24);
-
-    // Head and jaw
+    // Main body (smaller)
+    ctx.fillStyle = "#6b1414";
+    ctx.fillRect(bodyX, bodyY, bodyW, bodyH);
     ctx.fillStyle = "#7f1d1d";
-    ctx.fillRect(headX, boss.y + 16, 36, 26);
-    ctx.fillRect(headX + (dragonFace > 0 ? 24 : -6), boss.y + 30, 20, 12);
-    ctx.fillStyle = "#fecaca";
-    ctx.fillRect(headX + (dragonFace > 0 ? 20 : -2), boss.y + 38, 12, 6);
+    ctx.fillRect(bodyX + 8, bodyY + 10, bodyW - 16, bodyH - 14);
 
-    // Horns
-    ctx.fillStyle = "#fef08a";
-    ctx.beginPath();
-    ctx.moveTo(headX + 6, boss.y + 16);
-    ctx.lineTo(headX - 2, boss.y + 2);
-    ctx.lineTo(headX + 12, boss.y + 16);
-    ctx.fill();
-    ctx.beginPath();
-    ctx.moveTo(headX + 28, boss.y + 16);
-    ctx.lineTo(headX + 36, boss.y + 2);
-    ctx.lineTo(headX + 22, boss.y + 16);
-    ctx.fill();
+    // Scale pattern
+    ctx.fillStyle = "#8b1f1f";
+    for (let sy = bodyY + 4; sy < bodyY + bodyH - 4; sy += 7) {
+      for (let sx = bodyX + 8; sx < bodyX + bodyW - 8; sx += 10) {
+        ctx.fillRect(sx + ((sy / 8) % 2 ? 2 : 0), sy, 4, 3);
+      }
+    }
 
-    // Eye and nostril
-    ctx.fillStyle = "#111827";
-    ctx.fillRect(headEyeX, boss.y + 22, 6, 6);
-    ctx.fillStyle = "#fb7185";
-    ctx.fillRect(headEyeX + 1, boss.y + 23, 3, 3);
-    ctx.fillStyle = "#111827";
-    ctx.fillRect(headX + (dragonFace > 0 ? 34 : 0), boss.y + 34, 2, 2);
+    // Three necks + independent head sway (middle neck longest)
+    const neckBaseY = bodyY + 4;
+    const heads = [
+      { baseX: bodyX + 10, neckLen: 18, phase: 0 },
+      { baseX: bodyX + bodyW / 2 - 6, neckLen: 28, phase: 1.2 },
+      { baseX: bodyX + bodyW - 22, neckLen: 19, phase: 2.4 }
+    ];
+    for (const h of heads) {
+      const swayX = Math.sin(t + h.phase) * 3;
+      const swayY = Math.cos(t * 1.2 + h.phase) * 2;
+      const neckX = h.baseX + swayX;
+      const neckTopY = neckBaseY - h.neckLen + swayY;
+      const headX = dragonFace > 0 ? neckX + 6 : neckX - 24;
+      const snoutX = dragonFace > 0 ? headX + 20 : headX - 18;
+      const eyeX = dragonFace > 0 ? headX + 12 : headX + 6;
+      const hornBaseX = dragonFace > 0 ? headX + 4 : headX + 14;
+
+      ctx.fillStyle = "#5b1212";
+      ctx.fillRect(neckX, neckTopY, 12, h.neckLen);
+      ctx.fillStyle = "#6b1414";
+      ctx.fillRect(headX, neckTopY - 12, 24, 14);
+      ctx.fillRect(snoutX, neckTopY - 10, 18, 10);
+      ctx.fillStyle = "#fecaca";
+      ctx.fillRect(snoutX, neckTopY - 1, 14, 4);
+
+      ctx.fillStyle = "#fef08a";
+      ctx.beginPath();
+      ctx.moveTo(hornBaseX, neckTopY - 12);
+      ctx.lineTo(hornBaseX - 5, neckTopY - 22);
+      ctx.lineTo(hornBaseX + 4, neckTopY - 12);
+      ctx.fill();
+      ctx.beginPath();
+      ctx.moveTo(hornBaseX + 10, neckTopY - 12);
+      ctx.lineTo(hornBaseX + 15, neckTopY - 22);
+      ctx.lineTo(hornBaseX + 6, neckTopY - 12);
+      ctx.fill();
+
+      ctx.fillStyle = "#111827";
+      ctx.fillRect(eyeX, neckTopY - 9, 4, 4);
+      ctx.fillStyle = "#fb7185";
+      ctx.fillRect(eyeX + 1, neckTopY - 8, 2, 2);
+      ctx.fillStyle = "#111827";
+      ctx.fillRect(dragonFace > 0 ? snoutX + 15 : snoutX + 1, neckTopY - 6, 2, 2);
+    }
 
     // Claws
     ctx.fillStyle = "#7c2d12";
-    ctx.fillRect(boss.x + 28, boss.y + boss.h - 2, 18, 8);
-    ctx.fillRect(boss.x + boss.w - 46, boss.y + boss.h - 2, 18, 8);
+    ctx.fillRect(bodyX + 8, bodyY + bodyH - 2, 18, 8);
+    ctx.fillRect(bodyX + bodyW - 26, bodyY + bodyH - 2, 18, 8);
+    ctx.fillRect(bodyX + 14, bodyY + bodyH + 5, 10, 3);
+    ctx.fillRect(bodyX + bodyW - 20, bodyY + bodyH + 5, 10, 3);
   }
 
   if (eliteGuard.alive && !player.inBossRoom) {
+    if (eliteGuard.skillMode === "windup") {
+      ctx.fillStyle = "#ef444466";
+      ctx.fillRect(eliteGuard.x - 8, eliteGuard.y - 8, eliteGuard.w + 16, eliteGuard.h + 16);
+    }
     // Larger elite demon with exaggerated horns.
-    ctx.fillStyle = "#7f1d1d";
+    ctx.fillStyle = "#3b0a0a";
     ctx.fillRect(eliteGuard.x, eliteGuard.y, eliteGuard.w, eliteGuard.h);
-    ctx.fillStyle = "#fca5a5";
+    ctx.fillStyle = "#5b1111";
+    ctx.fillRect(eliteGuard.x + 6, eliteGuard.y + 10, eliteGuard.w - 12, eliteGuard.h - 18);
+    ctx.fillStyle = "#ef4444";
     ctx.fillRect(eliteGuard.x + 14, eliteGuard.y + 20, 10, 10);
     ctx.fillRect(eliteGuard.x + 40, eliteGuard.y + 20, 10, 10);
     ctx.fillStyle = "#111827";
     ctx.fillRect(eliteGuard.x + 16, eliteGuard.y + 22, 4, 4);
     ctx.fillRect(eliteGuard.x + 42, eliteGuard.y + 22, 4, 4);
+    ctx.fillStyle = "#7f1d1d";
+    ctx.fillRect(eliteGuard.x + 22, eliteGuard.y + 42, 20, 12);
     ctx.fillStyle = "#fef08a";
     ctx.beginPath();
     ctx.moveTo(eliteGuard.x + 10, eliteGuard.y + 6);
@@ -892,11 +1042,30 @@ function drawWorld() {
     ctx.lineTo(eliteGuard.x + 44, eliteGuard.y - 18);
     ctx.lineTo(eliteGuard.x + 34, eliteGuard.y + 6);
     ctx.fill();
-    ctx.fillStyle = "#b91c1c";
-    ctx.fillRect(eliteGuard.x + 20, eliteGuard.y + 44, 24, 12);
+    // Tail
+    ctx.fillStyle = "#2a0606";
+    ctx.fillRect(eliteGuard.x - 16, eliteGuard.y + 50, 18, 10);
+    ctx.beginPath();
+    ctx.moveTo(eliteGuard.x - 16, eliteGuard.y + 50);
+    ctx.lineTo(eliteGuard.x - 25, eliteGuard.y + 55);
+    ctx.lineTo(eliteGuard.x - 16, eliteGuard.y + 60);
+    ctx.fill();
+    // Trident
+    const tridentX = eliteGuard.x + eliteGuard.w + 8;
+    const tridentTop = eliteGuard.y + 10;
+    const tridentBottom = eliteGuard.y + eliteGuard.h - 6;
+    ctx.fillStyle = "#9ca3af";
+    ctx.fillRect(tridentX, tridentTop, 4, tridentBottom - tridentTop);
+    ctx.fillRect(tridentX - 6, tridentTop - 8, 16, 4);
+    ctx.fillRect(tridentX - 8, tridentTop - 14, 4, 8);
+    ctx.fillRect(tridentX, tridentTop - 16, 4, 10);
+    ctx.fillRect(tridentX + 8, tridentTop - 14, 4, 8);
   }
 
   if (!(player.invulnTimer > 0 && player.invulnTimer % 8 < 4)) {
+    const stride = Math.sin(player.walkCycle) * 4.8;
+    const leadA = stride;
+    const leadB = -stride;
     if (player.crouching) {
       // Crouching adventurer pose.
       ctx.fillStyle = "#991b1b";
@@ -950,9 +1119,20 @@ function drawWorld() {
         ctx.lineTo(player.x + 22, player.y + 16);
         ctx.fill();
       }
+      // Reworked gait: left/right legs alternate stepping forward.
+      const legBaseY = player.y + 44;
+      const shinLen = 10;
+      const bootW = 10;
+      const leftHipX = player.x + 15;
+      const rightHipX = player.x + 27;
+      const leftFootX = leftHipX + leadA;
+      const rightFootX = rightHipX + leadB;
+      ctx.fillStyle = "#334155";
+      ctx.fillRect(leftFootX - 2, legBaseY, 4, shinLen);
+      ctx.fillRect(rightFootX - 2, legBaseY, 4, shinLen);
       ctx.fillStyle = "#7c2d12";
-      ctx.fillRect(player.x + 12, player.y + 52, 7, 8);
-      ctx.fillRect(player.x + 23, player.y + 52, 7, 8);
+      ctx.fillRect(leftFootX - 5, legBaseY + shinLen, bootW, 6);
+      ctx.fillRect(rightFootX - 5, legBaseY + shinLen, bootW, 6);
       ctx.fillStyle = "#111827";
       ctx.fillRect(player.x + 17, player.y + 6, 2, 2);
       ctx.fillRect(player.x + 23, player.y + 6, 2, 2);
@@ -1043,6 +1223,16 @@ function drawHud() {
     ctx.font = "16px sans-serif";
     ctx.fillText("恶龙血条", 232, 171);
   }
+
+  // Top-right build info
+  ctx.fillStyle = "#020617cc";
+  ctx.fillRect(WIDTH - 300, 12, 286, 58);
+  ctx.strokeStyle = "#64748b";
+  ctx.strokeRect(WIDTH - 300, 12, 286, 58);
+  ctx.fillStyle = "#e2e8f0";
+  ctx.font = "13px sans-serif";
+  ctx.fillText(`版本: ${GAME_META.version}`, WIDTH - 288, 34);
+  ctx.fillText(`更新: ${GAME_META.updatedAt}`, WIDTH - 288, 55);
 }
 
 function drawResult() {
@@ -1076,6 +1266,7 @@ function loop() {
   updatePlayer();
   updateMonsters();
   updateEliteGuard();
+  updateEliteProjectiles();
   updateKeyItem();
   updateDoorAndTransition();
   updateBoss();
