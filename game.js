@@ -163,6 +163,7 @@ const boss = {
   chargeWindupFrames: 40,
   alignYTolerance: 18,
   alignYSpeed: 3.2,
+  lastAttackType: null,
   lastHitAttackId: -1
 };
 
@@ -570,7 +571,12 @@ function chooseBossAttackMode() {
   if (boss.chargeCooldown <= 0) readyAttacks.push("charge");
   if (boss.flameCooldown <= 0) readyAttacks.push("flame");
   if (readyAttacks.length === 0) return;
-  const nextAttack = readyAttacks[Math.floor(Math.random() * readyAttacks.length)];
+  let pool = readyAttacks;
+  if (readyAttacks.length > 1 && boss.lastAttackType) {
+    const filtered = readyAttacks.filter((a) => a !== boss.lastAttackType);
+    if (filtered.length > 0) pool = filtered;
+  }
+  const nextAttack = pool[Math.floor(Math.random() * pool.length)];
 
   const playerCenterY = player.y + player.h * 0.5;
   const bossCenterY = boss.y + boss.h * 0.5;
@@ -586,6 +592,7 @@ function chooseBossAttackMode() {
   if (nextAttack === "flame") {
     boss.attackMode = "flame";
     boss.modeTimer = 0;
+    boss.lastAttackType = "flame";
     return;
   }
   if (nextAttack === "charge") {
@@ -594,10 +601,12 @@ function chooseBossAttackMode() {
     boss.chargeDir = player.x > boss.x ? 1 : -1;
     boss.chargeState = "windup";
     boss.vx = 0;
+    boss.lastAttackType = "charge";
     return;
   }
   boss.attackMode = "fireball";
   boss.modeTimer = 18;
+  boss.lastAttackType = "fireball";
 }
 
 function updateBoss() {
