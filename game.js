@@ -11,6 +11,18 @@ const keys = Object.create(null);
 const keyPressed = Object.create(null);
 const clamp = (n, min, max) => Math.max(min, Math.min(max, n));
 
+// Hidden combat numbers: not displayed in HUD.
+const hiddenStats = {
+  playerBaseAttack: 22,
+  playerAttackPerLevel: 3,
+  monsterDefense: 4,
+  eliteMaxHp: 3,
+  eliteDefense: 10,
+  bossMaxHp: 320,
+  bossDefense: 7,
+  bossMinHits: 10
+};
+
 const MAIN_END_X = 3000;
 const door = {
   x: 2760,
@@ -54,6 +66,8 @@ const player = {
   invulnTimer: 0,
   attackTimer: 0,
   attackCooldown: 0,
+  attackId: 0,
+  crouching: false,
   level: 1,
   exp: 0,
   kills: 0,
@@ -86,7 +100,8 @@ const monsters = monsterSeed.map((m) => ({
   right: m.right,
   alive: true,
   knock: 0,
-  respawnTimer: 0
+  respawnTimer: 0,
+  lastHitAttackId: -1
 }));
 
 const keyItem = {
@@ -98,34 +113,57 @@ const keyItem = {
   h: 18
 };
 
+const eliteGuard = {
+  x: 2620,
+  y: 220,
+  w: 64,
+  h: 82,
+  vx: 1.3,
+  vy: 0,
+  left: 2500,
+  right: 2730,
+  hp: hiddenStats.eliteMaxHp,
+  maxHp: hiddenStats.eliteMaxHp,
+  damage: 16,
+  alive: true,
+  hurtStun: 0,
+  knock: 0,
+  lastHitAttackId: -1
+};
+
 const boss = {
   active: false,
   alive: true,
   x: 4620,
   y: 250,
-  w: 180,
-  h: 120,
+  w: 136,
+  h: 92,
   vx: -1.7,
   vy: 0,
-  hp: 220,
-  maxHp: 220,
+  hp: hiddenStats.bossMaxHp,
+  maxHp: hiddenStats.bossMaxHp,
   touchDamage: 20,
-  attackTimer: 0,
-  phase: "idle",
-  chargeCooldown: 200,
-  fireballCooldown: 95,
-  flameCooldown: 170,
-  chargeDir: -1
+  attackMode: "idle",
+  modeTimer: 0,
+  chargeCooldown: 240,
+  fireballCooldown: 170,
+  flameCooldown: 280,
+  globalCooldown: 150,
+  chargeDir: -1,
+  chargeState: "none",
+  chargeWindupFrames: 40,
+  lastHitAttackId: -1
 };
 
 const fireballs = [];
 const flamePillars = [];
+const flameWarnings = [];
 const confetti = [];
 
 let cameraX = 0;
 let gameOver = false;
 let gameWin = false;
-let statusMessage = "击败怪物，满5击杀升级；击杀6只会掉落钥匙。";
+let statusMessage = "击败怪物，满5击杀升级；击败门口双角精英可掉落钥匙。";
 let statusTimer = 400;
 
 function aabb(a, b) {
@@ -171,12 +209,33 @@ function hitPlayer(damage, fromX) {
 
 function playerAttackBox() {
   if (player.attackTimer <= 0) return null;
+  const attackY = player.crouching ? player.y + 30 : player.y + 12;
+  const attackH = player.crouching ? 22 : player.h - 16;
   return {
     x: player.face > 0 ? player.x + player.w - 4 : player.x - 58 + 4,
-    y: player.y + 12,
+    y: attackY,
     w: 58,
-    h: player.h - 16
+    h: attackH
   };
+}
+
+function getPlayerAttackPower() {
+  return hiddenStats.playerBaseAttack + (player.level - 1) * hiddenStats.playerAttackPerLevel;
+}
+
+function getDamageAgainstMonster() {
+  return 9999;
+}
+
+function getDamageAgainstElite() {
+  const raw = Math.floor(getPlayerAttackPower() / 18) - hiddenStats.eliteDefense;
+  return clamp(raw, 1, 1);
+}
+
+function getDamageAgainstBoss() {
+  const raw = getPlayerAttackPower() - hiddenStats.bossDefense;
+  const maxPerHit = Math.floor(hiddenStats.bossMaxHp / hiddenStats.bossMinHits) - 1;
+  return clamp(raw, 12, maxPerHit);
 }
 
 function gainExpAndLevel() {
@@ -193,12 +252,10 @@ function gainExpAndLevel() {
 
 function tryDropKey(x, y) {
   if (keyItem.active || keyItem.collected) return;
-  if (player.kills >= 6) {
-    keyItem.active = true;
-    keyItem.x = x + 10;
-    keyItem.y = y + 22;
-    setStatus("钥匙掉落了！快去拾取。", 300);
-  }
+  keyItem.active = true;
+  keyItem.x = x + 10;
+  keyItem.y = y + 22;
+  setStatus("钥匙掉落了！快去拾取。", 300);
 }
 
 function updatePlayer() {
@@ -207,8 +264,14 @@ function updatePlayer() {
   const left = keys["a"] || keys["ArrowLeft"];
   const right = keys["d"] || keys["ArrowRight"];
   const jump = keys["w"] || keys["ArrowUp"] || keys[" "];
+  const crouch = keys["s"] || keys["ArrowDown"];
 
-  if (left && !right) {
+  player.crouching = crouch && player.onGround;
+
+  if (player.crouching) {
+    player.vx *= 0.7;
+    if (Math.abs(player.vx) < 0.15) player.vx = 0;
+  } else if (left && !right) {
     player.vx = -player.speed;
     player.face = -1;
   } else if (right && !left) {
@@ -219,7 +282,7 @@ function updatePlayer() {
     if (Math.abs(player.vx) < 0.15) player.vx = 0;
   }
 
-  if (jump && player.onGround) {
+  if (jump && player.onGround && !player.crouching) {
     player.vy = player.jumpPower;
     player.onGround = false;
   }
@@ -228,6 +291,7 @@ function updatePlayer() {
   if (keys["j"] && player.attackCooldown <= 0) {
     player.attackTimer = 12;
     player.attackCooldown = 22;
+    player.attackId += 1;
   }
   if (player.attackTimer > 0) player.attackTimer -= 1;
   if (player.invulnTimer > 0) player.invulnTimer -= 1;
@@ -291,16 +355,56 @@ function updateMonsters() {
       hitPlayer(m.damage, m.x);
     }
 
-    if (atk && aabb(atk, m)) {
-      m.hp -= 18;
+    if (atk && aabb(atk, m) && m.lastHitAttackId !== player.attackId) {
+      m.lastHitAttackId = player.attackId;
+      m.hp -= getDamageAgainstMonster();
       m.knock = 10;
       m.vx = player.face * 2.9;
       if (m.hp <= 0) {
         m.alive = false;
         m.respawnTimer = 520;
         gainExpAndLevel();
-        tryDropKey(m.x, m.y);
       }
+    }
+  }
+}
+
+function updateEliteGuard() {
+  if (!eliteGuard.alive || gameOver || gameWin || player.inBossRoom) return;
+  const atk = playerAttackBox();
+
+  if (eliteGuard.hurtStun > 0) {
+    eliteGuard.hurtStun -= 1;
+    eliteGuard.x += eliteGuard.knock;
+    eliteGuard.knock *= 0.84;
+    if (Math.abs(eliteGuard.knock) < 0.2) eliteGuard.knock = 0;
+  } else {
+    eliteGuard.x += eliteGuard.vx;
+    if (eliteGuard.x < eliteGuard.left || eliteGuard.x + eliteGuard.w > eliteGuard.right) {
+      eliteGuard.vx *= -1;
+    }
+  }
+
+  eliteGuard.vy += GRAVITY;
+  eliteGuard.y += eliteGuard.vy;
+  solvePlatforms(eliteGuard);
+
+  if (aabb(player, eliteGuard)) {
+    hitPlayer(eliteGuard.damage, eliteGuard.x + eliteGuard.w / 2);
+  }
+
+  if (atk && aabb(atk, eliteGuard) && eliteGuard.lastHitAttackId !== player.attackId) {
+    eliteGuard.lastHitAttackId = player.attackId;
+    eliteGuard.hp -= getDamageAgainstElite();
+    eliteGuard.hurtStun = 18;
+    eliteGuard.knock = player.face * 7.2;
+    eliteGuard.vx = player.face * 1.4;
+    if (eliteGuard.hp <= 0) {
+      eliteGuard.hp = 0;
+      eliteGuard.alive = false;
+      gainExpAndLevel();
+      tryDropKey(eliteGuard.x, eliteGuard.y);
+      setStatus("双角精英守卫已被击败。", 260);
     }
   }
 }
@@ -362,15 +466,50 @@ function spawnFireball() {
 }
 
 function spawnFlameWave() {
-  for (let i = 0; i < 4; i += 1) {
-    flamePillars.push({
-      x: clamp(player.x - 140 + i * 90, bossGateLeft + 30, WORLD_WIDTH - 80),
-      y: GROUND_Y - 10,
-      w: 34,
-      h: 0,
-      life: 70,
-      damage: 17
-    });
+  const fx = clamp(player.x + player.w / 2 - 17, bossGateLeft + 30, WORLD_WIDTH - 80);
+  flameWarnings.push({
+    x: fx,
+    y: GROUND_Y - 8,
+    w: 34,
+    h: 8,
+    life: 26
+  });
+}
+
+function spawnFlamePillarAt(x) {
+  flamePillars.push({
+    x,
+    y: GROUND_Y - 10,
+    w: 34,
+    h: 0,
+    life: 78,
+    damage: 17
+  });
+}
+
+function hasBossAttackRemnant() {
+  return fireballs.length > 0 || flamePillars.length > 0 || flameWarnings.length > 0;
+}
+
+function chooseBossAttackMode() {
+  if (boss.attackMode !== "idle") return;
+  if (boss.globalCooldown > 0) return;
+  if (hasBossAttackRemnant()) return;
+  if (boss.flameCooldown <= 0) {
+    boss.attackMode = "flame";
+    boss.modeTimer = 0;
+    return;
+  }
+  if (boss.chargeCooldown <= 0) {
+    boss.attackMode = "charge";
+    boss.modeTimer = boss.chargeWindupFrames;
+    boss.chargeDir = player.x > boss.x ? 1 : -1;
+    boss.chargeState = "windup";
+    return;
+  }
+  if (boss.fireballCooldown <= 0) {
+    boss.attackMode = "fireball";
+    boss.modeTimer = 18;
   }
 }
 
@@ -381,34 +520,51 @@ function updateBoss() {
   boss.fireballCooldown -= 1;
   boss.chargeCooldown -= 1;
   boss.flameCooldown -= 1;
+  if (boss.globalCooldown > 0) boss.globalCooldown -= 1;
+  boss.x += boss.vx;
+  if (boss.x < bossGateLeft + 120 || boss.x + boss.w > WORLD_WIDTH - 40) boss.vx *= -1;
 
-  if (boss.phase === "charge") {
-    boss.attackTimer -= 1;
-    boss.x += boss.chargeDir * 8;
-    if (boss.x < bossGateLeft + 120 || boss.x + boss.w > WORLD_WIDTH - 40) {
-      boss.chargeDir *= -1;
+  chooseBossAttackMode();
+  if (boss.attackMode === "fireball") {
+    boss.modeTimer -= 1;
+    if (boss.modeTimer === 10) spawnFireball();
+    if (boss.modeTimer <= 0) {
+      boss.attackMode = "idle";
+      boss.fireballCooldown = 210;
+      boss.globalCooldown = 130;
     }
-    if (boss.attackTimer <= 0) {
-      boss.phase = "idle";
-      boss.vx = player.x > boss.x ? 1.8 : -1.8;
-    }
-  } else {
-    boss.x += boss.vx;
-    if (boss.x < bossGateLeft + 120 || boss.x + boss.w > WORLD_WIDTH - 40) boss.vx *= -1;
-
-    if (boss.fireballCooldown <= 0) {
-      spawnFireball();
-      boss.fireballCooldown = 90;
-    }
-    if (boss.flameCooldown <= 0) {
+  } else if (boss.attackMode === "flame") {
+    if (boss.modeTimer === 0) {
       spawnFlameWave();
-      boss.flameCooldown = 190;
+      boss.modeTimer = -1;
     }
-    if (boss.chargeCooldown <= 0) {
-      boss.phase = "charge";
-      boss.attackTimer = 44;
-      boss.chargeDir = player.x > boss.x ? 1 : -1;
-      boss.chargeCooldown = 210;
+    if (flameWarnings.length === 0 && flamePillars.length === 0) {
+      boss.attackMode = "idle";
+      boss.flameCooldown = 320;
+      boss.globalCooldown = 150;
+      boss.modeTimer = 0;
+    }
+  } else if (boss.attackMode === "charge") {
+    boss.modeTimer -= 1;
+    if (boss.chargeState === "windup") {
+      // Brief backstep before dashing, with red glow warning.
+      boss.x -= boss.chargeDir * 2.2;
+      if (boss.modeTimer <= 0) {
+        boss.chargeState = "dash";
+        boss.modeTimer = 34;
+      }
+    } else {
+      boss.x += boss.chargeDir * 11.2;
+      if (boss.x < bossGateLeft + 120 || boss.x + boss.w > WORLD_WIDTH - 40) {
+        boss.chargeDir *= -1;
+      }
+      if (boss.modeTimer <= 0) {
+        boss.attackMode = "idle";
+        boss.chargeState = "none";
+        boss.chargeCooldown = 260;
+        boss.globalCooldown = 140;
+        boss.vx = player.x > boss.x ? 2 : -2;
+      }
     }
   }
 
@@ -416,8 +572,9 @@ function updateBoss() {
     hitPlayer(boss.touchDamage, boss.x + boss.w / 2);
   }
 
-  if (atk && aabb(atk, boss)) {
-    boss.hp -= 20;
+  if (atk && aabb(atk, boss) && boss.lastHitAttackId !== player.attackId) {
+    boss.lastHitAttackId = player.attackId;
+    boss.hp -= getDamageAgainstBoss();
     boss.x += player.face * 8;
     if (boss.hp <= 0) {
       boss.hp = 0;
@@ -466,6 +623,15 @@ function updateBossProjectiles() {
       hitPlayer(p.damage, p.x);
     }
   }
+
+  for (let i = flameWarnings.length - 1; i >= 0; i -= 1) {
+    const w = flameWarnings[i];
+    w.life -= 1;
+    if (w.life <= 0) {
+      spawnFlamePillarAt(w.x);
+      flameWarnings.splice(i, 1);
+    }
+  }
 }
 
 function updateCamera() {
@@ -474,16 +640,49 @@ function updateCamera() {
   cameraX = clamp(cameraX, 0, WORLD_WIDTH - WIDTH);
 }
 
-function drawDoorAndCastle() {
-  ctx.fillStyle = "#1f2937";
-  ctx.fillRect(door.x - 130, 60, 390, 420);
-  ctx.fillStyle = "#111827";
-  ctx.fillRect(door.x - 100, 95, 330, 375);
-  ctx.fillStyle = "#374151";
-  for (let i = 0; i < 8; i += 1) {
-    const cx = door.x - 96 + i * 42;
-    ctx.fillRect(cx, 70, 30, 30);
+function drawWallCandelabra(x, y, scale = 1) {
+  ctx.fillStyle = "#6b7280";
+  ctx.fillRect(x - 14 * scale, y, 28 * scale, 4 * scale);
+  ctx.fillRect(x - 2 * scale, y - 8 * scale, 4 * scale, 10 * scale);
+  ctx.fillStyle = "#d1d5db";
+  ctx.fillRect(x - 10 * scale, y - 14 * scale, 6 * scale, 14 * scale);
+  ctx.fillRect(x + 4 * scale, y - 14 * scale, 6 * scale, 14 * scale);
+  ctx.fillStyle = "#fb923c";
+  ctx.beginPath();
+  ctx.arc(x - 7 * scale, y - 16 * scale, 3 * scale, 0, Math.PI * 2);
+  ctx.arc(x + 7 * scale, y - 16 * scale, 3 * scale, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = "#fde68a";
+  ctx.fillRect(x - 8 * scale, y - 20 * scale, 2 * scale, 4 * scale);
+  ctx.fillRect(x + 6 * scale, y - 20 * scale, 2 * scale, 4 * scale);
+}
+
+function drawCurtain(x, topY, h, w) {
+  ctx.fillStyle = "#7f1d1d";
+  ctx.fillRect(x, topY, w, h);
+  ctx.fillStyle = "#991b1b";
+  for (let i = 0; i < 4; i += 1) {
+    ctx.fillRect(x + 6 + i * (w / 4), topY + 8, 5, h - 16);
   }
+  ctx.fillStyle = "#f59e0b";
+  ctx.fillRect(x - 2, topY, w + 4, 6);
+}
+
+function drawDoorAndCastle() {
+  ctx.fillStyle = "#312e3d";
+  ctx.fillRect(door.x - 180, 40, 500, 440);
+  ctx.fillStyle = "#1f1b2e";
+  ctx.fillRect(door.x - 140, 84, 420, 396);
+  ctx.fillStyle = "#4b5563";
+  for (let i = 0; i < 10; i += 1) {
+    const cx = door.x - 136 + i * 40;
+    ctx.fillRect(cx, 58, 26, 24);
+  }
+
+  drawCurtain(door.x - 126, 92, 250, 46);
+  drawCurtain(door.x + 168, 92, 250, 46);
+  drawWallCandelabra(door.x - 54, 214, 1.15);
+  drawWallCandelabra(door.x + 202, 214, 1.15);
 
   if (!door.open) {
     ctx.fillStyle = "#7c2d12";
@@ -499,12 +698,18 @@ function drawDoorAndCastle() {
 }
 
 function drawBossRoomBackground() {
-  ctx.fillStyle = "#1e1b4b";
+  ctx.fillStyle = "#2a1f33";
   ctx.fillRect(bossRoomStart - 20, 0, WORLD_WIDTH - bossRoomStart + 20, GROUND_Y);
-  ctx.fillStyle = "#312e81";
-  for (let x = bossRoomStart; x < WORLD_WIDTH; x += 180) {
-    ctx.fillRect(x + 30, 50, 70, 120);
+  ctx.fillStyle = "#3f2b4a";
+  for (let x = bossRoomStart; x < WORLD_WIDTH; x += 220) {
+    ctx.fillRect(x + 26, 40, 86, 140);
   }
+  for (let x = bossRoomStart + 140; x < WORLD_WIDTH - 120; x += 260) {
+    drawWallCandelabra(x, 210, 1.35);
+  }
+  drawCurtain(bossRoomStart + 64, 70, 270, 52);
+  drawCurtain(WORLD_WIDTH - 182, 70, 270, 52);
+
   ctx.fillStyle = "#1f2937";
   ctx.fillRect(bossGateLeft, 0, 16, GROUND_Y + 70);
 }
@@ -533,14 +738,28 @@ function drawWorld() {
 
   for (const m of monsters) {
     if (!m.alive) continue;
-    ctx.fillStyle = "#b91c1c";
-    ctx.fillRect(m.x, m.y, m.w, m.h);
-    ctx.fillStyle = "#fca5a5";
-    ctx.fillRect(m.x + 8, m.y + 10, 8, 8);
-    ctx.fillRect(m.x + 28, m.y + 10, 8, 8);
+    // Regular demon
+    ctx.fillStyle = "#7f1d1d";
+    ctx.fillRect(m.x + 3, m.y + 6, m.w - 6, m.h - 6);
+    ctx.fillStyle = "#ef4444";
+    ctx.fillRect(m.x + 11, m.y + 16, 8, 8);
+    ctx.fillRect(m.x + 25, m.y + 16, 8, 8);
     ctx.fillStyle = "#111827";
-    ctx.fillRect(m.x + 10, m.y + 12, 4, 4);
-    ctx.fillRect(m.x + 30, m.y + 12, 4, 4);
+    ctx.fillRect(m.x + 13, m.y + 18, 3, 3);
+    ctx.fillRect(m.x + 27, m.y + 18, 3, 3);
+    ctx.fillStyle = "#fef08a";
+    ctx.beginPath();
+    ctx.moveTo(m.x + 8, m.y + 7);
+    ctx.lineTo(m.x + 14, m.y - 4);
+    ctx.lineTo(m.x + 18, m.y + 7);
+    ctx.fill();
+    ctx.beginPath();
+    ctx.moveTo(m.x + m.w - 8, m.y + 7);
+    ctx.lineTo(m.x + m.w - 14, m.y - 4);
+    ctx.lineTo(m.x + m.w - 18, m.y + 7);
+    ctx.fill();
+    ctx.fillStyle = "#fca5a5";
+    ctx.fillRect(m.x + 17, m.y + 30, 10, 6);
   }
 
   if (keyItem.active && !keyItem.collected) {
@@ -564,32 +783,214 @@ function drawWorld() {
     ctx.fillRect(p.x + 6, p.y + 8, p.w - 12, Math.max(0, p.h - 16));
   }
 
+  for (const w of flameWarnings) {
+    const pulse = w.life % 10 < 5;
+    ctx.fillStyle = pulse ? "#ef4444cc" : "#fca5a599";
+    ctx.fillRect(w.x - 2, w.y, w.w + 4, w.h);
+    ctx.strokeStyle = "#fee2e2";
+    ctx.strokeRect(w.x - 2, w.y, w.w + 4, w.h);
+  }
+
   if (boss.active && boss.alive) {
+    if (boss.attackMode === "charge" && boss.chargeState === "windup") {
+      ctx.fillStyle = "#ef444466";
+      ctx.fillRect(boss.x - 10, boss.y - 10, boss.w + 20, boss.h + 20);
+    }
+    const dragonFace = player.x >= boss.x ? 1 : -1;
+    const headX = dragonFace > 0 ? boss.x + boss.w - 44 : boss.x + 8;
+    const headEyeX = dragonFace > 0 ? headX + 26 : headX + 10;
+
+    // Wings
+    ctx.fillStyle = "#7f1d1d";
+    ctx.beginPath();
+    ctx.moveTo(boss.x + 16, boss.y + 40);
+    ctx.lineTo(boss.x - 32, boss.y + 4);
+    ctx.lineTo(boss.x + 4, boss.y + 62);
+    ctx.fill();
+    ctx.beginPath();
+    ctx.moveTo(boss.x + boss.w - 16, boss.y + 40);
+    ctx.lineTo(boss.x + boss.w + 32, boss.y + 4);
+    ctx.lineTo(boss.x + boss.w - 4, boss.y + 62);
+    ctx.fill();
+
+    // Tail
     ctx.fillStyle = "#991b1b";
-    ctx.fillRect(boss.x, boss.y, boss.w, boss.h);
+    if (dragonFace > 0) {
+      ctx.fillRect(boss.x - 26, boss.y + 58, 30, 12);
+      ctx.beginPath();
+      ctx.moveTo(boss.x - 26, boss.y + 58);
+      ctx.lineTo(boss.x - 38, boss.y + 64);
+      ctx.lineTo(boss.x - 26, boss.y + 70);
+      ctx.fill();
+    } else {
+      ctx.fillRect(boss.x + boss.w - 4, boss.y + 58, 30, 12);
+      ctx.beginPath();
+      ctx.moveTo(boss.x + boss.w + 26, boss.y + 58);
+      ctx.lineTo(boss.x + boss.w + 38, boss.y + 64);
+      ctx.lineTo(boss.x + boss.w + 26, boss.y + 70);
+      ctx.fill();
+    }
+
+    // Body
+    ctx.fillStyle = "#991b1b";
+    ctx.fillRect(boss.x + 10, boss.y + 22, boss.w - 20, boss.h - 16);
     ctx.fillStyle = "#fca5a5";
-    ctx.fillRect(boss.x + 22, boss.y + 24, 16, 16);
-    ctx.fillRect(boss.x + 130, boss.y + 24, 16, 16);
+    ctx.fillRect(boss.x + 24, boss.y + 42, boss.w - 48, 24);
+
+    // Head and jaw
+    ctx.fillStyle = "#7f1d1d";
+    ctx.fillRect(headX, boss.y + 16, 36, 26);
+    ctx.fillRect(headX + (dragonFace > 0 ? 24 : -6), boss.y + 30, 20, 12);
+    ctx.fillStyle = "#fecaca";
+    ctx.fillRect(headX + (dragonFace > 0 ? 20 : -2), boss.y + 38, 12, 6);
+
+    // Horns
+    ctx.fillStyle = "#fef08a";
+    ctx.beginPath();
+    ctx.moveTo(headX + 6, boss.y + 16);
+    ctx.lineTo(headX - 2, boss.y + 2);
+    ctx.lineTo(headX + 12, boss.y + 16);
+    ctx.fill();
+    ctx.beginPath();
+    ctx.moveTo(headX + 28, boss.y + 16);
+    ctx.lineTo(headX + 36, boss.y + 2);
+    ctx.lineTo(headX + 22, boss.y + 16);
+    ctx.fill();
+
+    // Eye and nostril
     ctx.fillStyle = "#111827";
-    ctx.fillRect(boss.x + 26, boss.y + 28, 8, 8);
-    ctx.fillRect(boss.x + 134, boss.y + 28, 8, 8);
-    ctx.fillStyle = "#ef4444";
-    ctx.fillRect(boss.x - 22, boss.y + 44, 20, 42);
-    ctx.fillRect(boss.x + boss.w + 2, boss.y + 44, 20, 42);
+    ctx.fillRect(headEyeX, boss.y + 22, 6, 6);
+    ctx.fillStyle = "#fb7185";
+    ctx.fillRect(headEyeX + 1, boss.y + 23, 3, 3);
+    ctx.fillStyle = "#111827";
+    ctx.fillRect(headX + (dragonFace > 0 ? 34 : 0), boss.y + 34, 2, 2);
+
+    // Claws
+    ctx.fillStyle = "#7c2d12";
+    ctx.fillRect(boss.x + 28, boss.y + boss.h - 2, 18, 8);
+    ctx.fillRect(boss.x + boss.w - 46, boss.y + boss.h - 2, 18, 8);
+  }
+
+  if (eliteGuard.alive && !player.inBossRoom) {
+    // Larger elite demon with exaggerated horns.
+    ctx.fillStyle = "#7f1d1d";
+    ctx.fillRect(eliteGuard.x, eliteGuard.y, eliteGuard.w, eliteGuard.h);
+    ctx.fillStyle = "#fca5a5";
+    ctx.fillRect(eliteGuard.x + 14, eliteGuard.y + 20, 10, 10);
+    ctx.fillRect(eliteGuard.x + 40, eliteGuard.y + 20, 10, 10);
+    ctx.fillStyle = "#111827";
+    ctx.fillRect(eliteGuard.x + 16, eliteGuard.y + 22, 4, 4);
+    ctx.fillRect(eliteGuard.x + 42, eliteGuard.y + 22, 4, 4);
+    ctx.fillStyle = "#fef08a";
+    ctx.beginPath();
+    ctx.moveTo(eliteGuard.x + 10, eliteGuard.y + 6);
+    ctx.lineTo(eliteGuard.x + 20, eliteGuard.y - 18);
+    ctx.lineTo(eliteGuard.x + 30, eliteGuard.y + 6);
+    ctx.fill();
+    ctx.beginPath();
+    ctx.moveTo(eliteGuard.x + 54, eliteGuard.y + 6);
+    ctx.lineTo(eliteGuard.x + 44, eliteGuard.y - 18);
+    ctx.lineTo(eliteGuard.x + 34, eliteGuard.y + 6);
+    ctx.fill();
+    ctx.fillStyle = "#b91c1c";
+    ctx.fillRect(eliteGuard.x + 20, eliteGuard.y + 44, 24, 12);
   }
 
   if (!(player.invulnTimer > 0 && player.invulnTimer % 8 < 4)) {
-    ctx.fillStyle = "#f59e0b";
-    ctx.fillRect(player.x, player.y, player.w, player.h);
-    ctx.fillStyle = "#111827";
-    ctx.fillRect(player.x + 10, player.y + 14, 6, 6);
-    ctx.fillRect(player.x + 26, player.y + 14, 6, 6);
+    if (player.crouching) {
+      // Crouching adventurer pose.
+      ctx.fillStyle = "#991b1b";
+      if (player.face > 0) {
+        ctx.beginPath();
+        ctx.moveTo(player.x + 10, player.y + 28);
+        ctx.lineTo(player.x + 3, player.y + 46);
+        ctx.lineTo(player.x + 15, player.y + 58);
+        ctx.lineTo(player.x + 22, player.y + 30);
+        ctx.fill();
+      } else {
+        ctx.beginPath();
+        ctx.moveTo(player.x + 32, player.y + 28);
+        ctx.lineTo(player.x + 39, player.y + 46);
+        ctx.lineTo(player.x + 27, player.y + 58);
+        ctx.lineTo(player.x + 20, player.y + 30);
+        ctx.fill();
+      }
+      ctx.fillStyle = "#1f2937";
+      ctx.fillRect(player.x + 10, player.y + 24, 24, 24);
+      ctx.fillStyle = "#f1c27d";
+      ctx.fillRect(player.x + 15, player.y + 18, 12, 10);
+      ctx.fillStyle = "#7c2d12";
+      ctx.fillRect(player.x + 12, player.y + 50, 10, 8);
+      ctx.fillRect(player.x + 22, player.y + 50, 10, 8);
+      ctx.fillStyle = "#111827";
+      ctx.fillRect(player.x + 18, player.y + 21, 2, 2);
+      ctx.fillRect(player.x + 23, player.y + 21, 2, 2);
+    } else {
+      // Standing adventurer body.
+      ctx.fillStyle = "#1f2937";
+      ctx.fillRect(player.x + 11, player.y + 10, 20, 42);
+      ctx.fillStyle = "#f1c27d";
+      ctx.fillRect(player.x + 14, player.y + 2, 14, 12);
+      ctx.fillStyle = "#0f172a";
+      ctx.fillRect(player.x + 13, player.y, 16, 4);
+      // Cape
+      ctx.fillStyle = "#991b1b";
+      if (player.face > 0) {
+        ctx.beginPath();
+        ctx.moveTo(player.x + 11, player.y + 14);
+        ctx.lineTo(player.x + 2, player.y + 42);
+        ctx.lineTo(player.x + 14, player.y + 58);
+        ctx.lineTo(player.x + 20, player.y + 16);
+        ctx.fill();
+      } else {
+        ctx.beginPath();
+        ctx.moveTo(player.x + 31, player.y + 14);
+        ctx.lineTo(player.x + 40, player.y + 42);
+        ctx.lineTo(player.x + 28, player.y + 58);
+        ctx.lineTo(player.x + 22, player.y + 16);
+        ctx.fill();
+      }
+      ctx.fillStyle = "#7c2d12";
+      ctx.fillRect(player.x + 12, player.y + 52, 7, 8);
+      ctx.fillRect(player.x + 23, player.y + 52, 7, 8);
+      ctx.fillStyle = "#111827";
+      ctx.fillRect(player.x + 17, player.y + 6, 2, 2);
+      ctx.fillRect(player.x + 23, player.y + 6, 2, 2);
+    }
   }
 
   const atk = playerAttackBox();
   if (atk) {
-    ctx.fillStyle = "#fde68a88";
-    ctx.fillRect(atk.x, atk.y, atk.w, atk.h);
+    const swordBaseX = player.face > 0 ? player.x + player.w - 2 : player.x + 2;
+    const swordBaseY = player.crouching ? player.y + 40 : player.y + 26;
+    const bladeX = swordBaseX + player.face * 8;
+    const bladeY = swordBaseY - 2;
+    const bladeW = 36;
+    const bladeH = 8;
+    ctx.fillStyle = "#e5e7eb";
+    if (player.face > 0) {
+      ctx.fillRect(bladeX, bladeY, bladeW, bladeH);
+      ctx.beginPath();
+      ctx.moveTo(bladeX + bladeW, bladeY);
+      ctx.lineTo(bladeX + bladeW + 8, bladeY + bladeH / 2);
+      ctx.lineTo(bladeX + bladeW, bladeY + bladeH);
+      ctx.fill();
+      ctx.fillStyle = "#fbbf24";
+      ctx.fillRect(bladeX - 8, bladeY + 1, 8, 6);
+      ctx.fillStyle = "#7c2d12";
+      ctx.fillRect(bladeX - 14, bladeY + 2, 6, 4);
+    } else {
+      ctx.fillRect(bladeX - bladeW, bladeY, bladeW, bladeH);
+      ctx.beginPath();
+      ctx.moveTo(bladeX - bladeW, bladeY);
+      ctx.lineTo(bladeX - bladeW - 8, bladeY + bladeH / 2);
+      ctx.lineTo(bladeX - bladeW, bladeY + bladeH);
+      ctx.fill();
+      ctx.fillStyle = "#fbbf24";
+      ctx.fillRect(bladeX, bladeY + 1, 8, 6);
+      ctx.fillStyle = "#7c2d12";
+      ctx.fillRect(bladeX + 8, bladeY + 2, 6, 4);
+    }
   }
 
   ctx.restore();
@@ -674,6 +1075,7 @@ function drawResult() {
 function loop() {
   updatePlayer();
   updateMonsters();
+  updateEliteGuard();
   updateKeyItem();
   updateDoorAndTransition();
   updateBoss();
