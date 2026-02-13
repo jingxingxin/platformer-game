@@ -3,6 +3,9 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
+    <meta http-equiv="Pragma" content="no-cache" />
+    <meta http-equiv="Expires" content="0" />
     <title>横版平台跳跃打怪</title>
     <link rel="stylesheet" href="style.css" />
   </head>
@@ -11,6 +14,52 @@
       移动: A/D 或 ←/→ | 跳跃: Space/W/↑ | 下蹲: S/↓ | 攻击: J | 互动: E
     </div>
     <canvas id="game" width="960" height="540"></canvas>
-    <script src="game.js"></script>
+    <script>
+      (() => {
+        const APP_VERSION = "2026.02.13.3";
+        const VERSION_FILE = "version.json";
+        const VERSION_STORAGE_KEY = "platformer_latest_version";
+        const RELOAD_ATTEMPTS_KEY = "platformer_force_reload_attempts";
+        const MAX_FORCE_RELOAD_ATTEMPTS = 3;
+
+        const loadGame = () => {
+          const script = document.createElement("script");
+          script.src = `game.js?v=${encodeURIComponent(APP_VERSION)}`;
+          document.body.appendChild(script);
+        };
+
+        const forceReload = (targetVersion) => {
+          const attempts = Number(sessionStorage.getItem(RELOAD_ATTEMPTS_KEY) || "0");
+          if (attempts >= MAX_FORCE_RELOAD_ATTEMPTS) {
+            loadGame();
+            return;
+          }
+          sessionStorage.setItem(RELOAD_ATTEMPTS_KEY, String(attempts + 1));
+          const nextUrl = new URL(window.location.href);
+          nextUrl.searchParams.set("v", targetVersion);
+          nextUrl.searchParams.set("_r", String(Date.now()));
+          window.location.replace(nextUrl.toString());
+        };
+
+        fetch(`${VERSION_FILE}?_=${Date.now()}`, { cache: "no-store" })
+          .then((res) => (res.ok ? res.json() : null))
+          .then((data) => {
+            const latestVersion =
+              data && typeof data.version === "string" ? data.version : APP_VERSION;
+            localStorage.setItem(VERSION_STORAGE_KEY, latestVersion);
+
+            if (latestVersion !== APP_VERSION) {
+              forceReload(latestVersion);
+              return;
+            }
+
+            sessionStorage.removeItem(RELOAD_ATTEMPTS_KEY);
+            loadGame();
+          })
+          .catch(() => {
+            loadGame();
+          });
+      })();
+    </script>
   </body>
 </html>
